@@ -1,8 +1,8 @@
+import json
 import os
 import re
-import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import phonenumbers
 import requests
@@ -40,53 +40,41 @@ def get_today_count():
 def fetch_new_domains():
     domains = set()
 
-    queries = [
-        "myshopify.com",
-        "mybigcommerce.com",
-        "wixsite.com",
-        "squarespace.com",
-        "webflow.io",
-        "shopify",
-        "boutique",
-        "skincare",
-        "dental",
-        "roofing",
-    ]
-    for q in queries:
-        try:
-            url = f"https://crt.sh{q}&exclude=expired&output=json"
-            resp = requests.get(url, headers=HEADERS, timeout=25)
-            if resp.status_code == 200:
-                data = resp.json()
-                for entry in data[:120]:
-                    raw = entry.get("name_value", "") or entry.get("common_name", "")
-                    for line in raw.splitlines():
-                        name = line.lower().strip()
-                        if (
-                            name
-                            and not name.startswith("*")
-                            and "." in name
-                            and not name.startswith("www.")
-                        ):
-                            domains.add(name)
-            time.sleep(3)
-        except Exception as e:
-            print(f"crt.sh skipped {q}: {e}")
+    # Source 1: Common Crawl Latest Index (100% free, never blocks GitHub IPs)
+    try:
+        coll_resp = requests.get("https://commoncrawl.org", timeout=15)
+        latest_api = coll_resp.json()["cdx-api"]
 
-    for domain_root in ("myshopify.com", "webflow.io", "wixsite.com"):
-        try:
-            url = f"https://certspotter.com{domain_root}&include_subdomains=true&expand=dns_names"
-            resp = requests.get(url, headers=HEADERS, timeout=20)
-            if resp.status_code == 200:
-                for item in resp.json():
-                    for name in item.get("dns_names", []):
-                        name = name.lower().strip()
-                        if name and not name.startswith("*") and "." in name:
-                            domains.add(name)
-            time.sleep(2)
-        except Exception as e:
-            print(f"CertSpotter skipped {domain_root}: {e}")
+        patterns = [
+            "*://*",
+            "*://*",
+            "*://*",
+            "*.webflow.io/*",
+            "*.store/*",
+            "*.shop/*",
+        ]
+        for pat in patterns:
+            try:
+                r = requests.get(
+                    latest_api,
+                    params={"url": pat, "output": "json", "limit": 120},
+                    timeout=20,
+                )
+                for line in r.text.splitlines():
+                    if not line.strip():
+                        continue
+                    obj = json.loads(line)
+                    host = urlparse(obj.get("url", "")).netloc.lower()
+                    if host.startswith("www."):
+                        host = host[4:]
+                    if host and "." in host and "accounts.shopify" not in host:
+                        domains.add(host)
+            except Exception as e:
+                print(f"CommonCrawl pattern {pat} error: {e}")
+    except Exception as e:
+        print(f"CommonCrawl index error: {e}")
 
+    print(f"Total unique candidate domains gathered: {len(domains)}")
     return list(domains)
 
 
@@ -143,33 +131,18 @@ def extract_contacts(html, base_url):
         except Exception:
             continue
 
-    socials = set()
-    social_domains = (
-        "://instagram.com",
-        "://facebook.com",
-        "://tiktok.com",
-        "://twitter.com",
-        "://x.com",
-        "://linkedin.com",
-    )
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if any(sd in href.lower() for sd in social_domains):
-            socials.add(href)
-
     title = soup.title.string.strip() if soup.title and soup.title.string else ""
     meta_desc = ""
     meta_tag = soup.find("meta", attrs={"name": "description"})
     if meta_tag and meta_tag.get("content"):
         meta_desc = meta_tag["content"].strip()
 
-    niche_summary = f"{title} {meta_desc}".strip()[:250]
+    niche_summary = f"{title} — {meta_desc}".strip(" —")[:250]
 
     return (
         ", ".join(clean_emails[:2]),
         ", ".join(valid_phones[:2]),
         whatsapp_url,
-        ", ".join(list(socials)[:4]),
         niche_summary,
     )
 
@@ -177,26 +150,22 @@ def extract_contacts(html, base_url):
 def scrape_site(domain):
     url = f"https://{domain}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
+        resp = requests.get(url, headers=HEADERS, timeout=8, allow_redirects=True)
         if resp.status_code >= 400:
             return None
         html = resp.text
         platform = detect_platform(html.lower(), domain)
-        email, phone, whatsapp, socials, niche_summary = extract_contacts(html, resp.url)
+        email, phone, whatsapp, niche_summary = extract_contacts(html, resp.url)
 
         if not email or not phone:
             for path in ("/pages/contact", "/contact", "/contact-us"):
                 try:
-                    c_resp = requests.get(urljoin(resp.url, path), headers=HEADERS, timeout=6)
+                    c_resp = requests.get(urljoin(resp.url, path), headers=HEADERS, timeout=5)
                     if c_resp.status_code == 200:
-                        e2, p2, w2, s2, _ = extract_contacts(c_resp.text, c_resp.url)
+                        e2, p2, w2, _ = extract_contacts(c_resp.text, c_resp.url)
                         email = email or e2
                         phone = phone or p2
                         whatsapp = whatsapp or w2
-                        if s2:
-                            socials = ", ".join(
-                                set(filter(None, (socials + ", " + s2).split(", ")))
-                            )
                         if email and phone:
                             break
                 except Exception:
@@ -209,7 +178,7 @@ def scrape_site(domain):
             "email": email or None,
             "phone": phone or None,
             "whatsapp_url": whatsapp or None,
-            "social_links": niche_summary or socials or None,
+            "social_links": niche_summary or None,
         }
     except Exception:
         return None
@@ -225,8 +194,6 @@ def main():
         return
 
     candidates = fetch_new_domains()
-    print(f"Found {len(candidates)} candidate domains to inspect.")
-
     added = 0
     for domain in candidates:
         if current_today + added >= DAILY_LIMIT:
@@ -250,4 +217,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

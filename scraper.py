@@ -39,19 +39,37 @@ def get_today_count():
 
 def fetch_new_domains():
     domains = set()
-    queries = ["%.myshopify.com", "%.store", "%.shop"]
-    for q in queries:
+
+    # Source 1: CertSpotter Free Certificate Transparency API (very fast & reliable)
+    for keyword in ("myshopify.com", "store", "shop", "online"):
         try:
-            url = f"https://crt.sh{q}&output=json"
-            resp = requests.get(url, headers=HEADERS, timeout=25)
+            url = f"https://certspotter.com{keyword}&include_subdomains=true&expand=dns_names"
+            resp = requests.get(url, headers=HEADERS, timeout=20)
             if resp.status_code == 200:
-                for entry in resp.json()[:400]:
-                    name = entry.get("common_name", "").lower().strip()
-                    if name and not name.startswith("*") and "." in name:
-                        domains.add(name)
-            time.sleep(5)
+                for item in resp.json():
+                    for name in item.get("dns_names", []):
+                        name = name.lower().strip()
+                        if name and not name.startswith("*") and "." in name:
+                            domains.add(name)
+            time.sleep(2)
         except Exception as e:
-            print(f"crt.sh query error for {q}: {e}")
+            print(f"CertSpotter error for {keyword}: {e}")
+
+    # Source 2: crt.sh fallback if we still need more candidates
+    if len(domains) < 300:
+        for q in ("%.myshopify.com", "%.mybigcommerce.com", "%.wixsite.com"):
+            try:
+                url = f"https://crt.sh{q}&output=json"
+                resp = requests.get(url, headers=HEADERS, timeout=30)
+                if resp.status_code == 200:
+                    for entry in resp.json()[:300]:
+                        name = entry.get("common_name", "").lower().strip()
+                        if name and not name.startswith("*") and "." in name:
+                            domains.add(name)
+                time.sleep(4)
+            except Exception as e:
+                print(f"crt.sh error for {q}: {e}")
+
     return list(domains)
 
 
@@ -60,7 +78,7 @@ def detect_platform(html_lower, domain):
         return "Shopify"
     if "wp-content" in html_lower or "woocommerce" in html_lower:
         return "WordPress / WooCommerce"
-    if "wix.com" in html_lower or "wixstatic" in html_lower:
+    if "wix.com" in html_lower or "wixstatic" in html_lower or ".wixsite.com" in domain:
         return "Wix"
     if "squarespace" in html_lower:
         return "Squarespace"
@@ -94,7 +112,6 @@ def extract_contacts(html, base_url):
         elif "wa.me/" in lower_href or "://whatsapp.com" in lower_href:
             whatsapp_url = href
 
-    # Validate phone numbers using Google's phonenumbers library
     valid_phones = []
     for candidate in list(phones) + re.findall(r"\+?\d[\d\s().-]{7,18}\d", text):
         try:
@@ -134,7 +151,6 @@ def scrape_site(domain):
         platform = detect_platform(html.lower(), domain)
         email, phone, whatsapp, socials = extract_contacts(html, resp.url)
 
-        # Also check /contact or /pages/contact if phone or email is missing
         if not email or not phone:
             for path in ("/pages/contact", "/contact", "/contact-us"):
                 try:
@@ -181,7 +197,6 @@ def main():
         if current_today + added >= DAILY_LIMIT:
             break
 
-        # Skip if already in DB
         existing = supabase.table("leads").select("id").eq("domain", domain).execute()
         if existing.data:
             continue

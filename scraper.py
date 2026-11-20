@@ -88,8 +88,9 @@ def extract_contacts(html, base_url):
         href = a["href"].strip()
         lower_href = href.lower()
         if lower_href.startswith("tel:"):
-            raw_num = href.split(":", 1)[1].split("?")[0].strip()
-            phones.add(raw_num)
+            _, _, after_colon = href.partition(":")
+            raw_num, _, _ = after_colon.partition("?")
+            phones.add(raw_num.strip())
         elif "wa.me/" in lower_href or "://whatsapp.com" in lower_href:
             whatsapp_url = href
 
